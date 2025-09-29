@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { useSensorMeasurement } from '@/hooks/useSensorMeasurement';
+import { useIMUHeight } from '@/hooks/useIMUHeight';
 import { Ruler, Smartphone, RotateCcw, PlayCircle, StopCircle } from 'lucide-react';
 
 const HeightMeasurement = () => {
@@ -14,7 +14,7 @@ const HeightMeasurement = () => {
     startMeasurement,
     stopMeasurement,
     resetMeasurement,
-  } = useSensorMeasurement();
+  } = useIMUHeight();
 
   const [showInstructions, setShowInstructions] = useState(true);
 
