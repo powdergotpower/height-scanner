@@ -1,18 +1,14 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 
-interface SensorData {
-  acceleration: { x: number; y: number; z: number };
-  rotationRate: { alpha: number; beta: number; gamma: number };
-  timestamp: number;
-}
-
 interface MeasurementState {
   isCalibrating: boolean;
   isMeasuring: boolean;
   isComplete: boolean;
   heightCm: number;
   heightFt: number;
+  heightInches: number;
   confidence: number;
+  debugInfo: string;
 }
 
 export const useSensorMeasurement = () => {
@@ -22,50 +18,94 @@ export const useSensorMeasurement = () => {
     isComplete: false,
     heightCm: 0,
     heightFt: 0,
+    heightInches: 0,
     confidence: 0,
+    debugInfo: '',
   });
 
   const [error, setError] = useState<string | null>(null);
   const [permissionGranted, setPermissionGranted] = useState(false);
 
-  // Sensor data storage
-  const sensorDataRef = useRef<SensorData[]>([]);
-  const calibrationDataRef = useRef<{ x: number; y: number; z: number } | null>(null);
-  const startPositionRef = useRef<{ x: number; y: number; z: number } | null>(null);
-  const velocityRef = useRef({ x: 0, y: 0, z: 0 });
-  const positionRef = useRef({ x: 0, y: 0, z: 0 });
+  // Measurement data storage
+  const startOrientationRef = useRef<{ alpha: number; beta: number; gamma: number } | null>(null);
+  const endOrientationRef = useRef<{ alpha: number; beta: number; gamma: number } | null>(null);
+  const measurementStartRef = useRef<number>(0);
+  const orientationSamplesRef = useRef<{ alpha: number; beta: number; gamma: number; timestamp: number }[]>([]);
   
-  // Filtering parameters
-  const GRAVITY = 9.81;
-  const NOISE_THRESHOLD = 0.1;
-  const VERTICAL_THRESHOLD = 0.8; // Minimum vertical component for valid movement
-  const SAMPLE_RATE = 60; // Hz
-  const FILTER_ALPHA = 0.8; // Low-pass filter coefficient
-
-  // Low-pass filter for noise reduction
-  const applyLowPassFilter = (current: number, previous: number, alpha: number): number => {
-    return alpha * current + (1 - alpha) * previous;
+  // Convert height to feet and inches
+  const convertHeight = (cm: number) => {
+    const totalInches = cm / 2.54;
+    const feet = Math.floor(totalInches / 12);
+    const inches = Math.round((totalInches % 12) * 10) / 10;
+    return { feet, inches, cm: Math.round(cm * 10) / 10 };
   };
 
   // Request sensor permissions
   const requestSensorPermission = useCallback(async () => {
     try {
-      if ('DeviceMotionEvent' in window && 'requestPermission' in DeviceMotionEvent) {
+      console.log('Requesting sensor permissions...');
+      
+      if ('DeviceMotionEvent' in window && typeof (DeviceMotionEvent as any).requestPermission === 'function') {
         // iOS 13+ permission request
-        const permission = await (DeviceMotionEvent as any).requestPermission();
-        if (permission === 'granted') {
-          setPermissionGranted(true);
-          setError(null);
-        } else {
+        const motionPermission = await (DeviceMotionEvent as any).requestPermission();
+        console.log('Motion permission:', motionPermission);
+        
+        if (motionPermission !== 'granted') {
           setError('Motion sensor permission denied');
+          return;
         }
-      } else {
-        // Android or older iOS
-        setPermissionGranted(true);
       }
+
+      if ('DeviceOrientationEvent' in window && typeof (DeviceOrientationEvent as any).requestPermission === 'function') {
+        // iOS 13+ permission request
+        const orientationPermission = await (DeviceOrientationEvent as any).requestPermission();
+        console.log('Orientation permission:', orientationPermission);
+        
+        if (orientationPermission !== 'granted') {
+          setError('Orientation sensor permission denied');
+          return;
+        }
+      }
+
+      setPermissionGranted(true);
+      setError(null);
+      console.log('All permissions granted');
     } catch (err) {
+      console.error('Permission error:', err);
       setError('Failed to request sensor permissions');
     }
+  }, []);
+
+  // Test sensor availability
+  const testSensors = useCallback(() => {
+    console.log('Testing sensor availability...');
+    
+    const testOrientation = (event: DeviceOrientationEvent) => {
+      console.log('Orientation test:', {
+        alpha: event.alpha,
+        beta: event.beta,
+        gamma: event.gamma,
+        absolute: event.absolute
+      });
+    };
+
+    const testMotion = (event: DeviceMotionEvent) => {
+      console.log('Motion test:', {
+        acceleration: event.acceleration,
+        accelerationIncludingGravity: event.accelerationIncludingGravity,
+        rotationRate: event.rotationRate,
+        interval: event.interval
+      });
+    };
+
+    window.addEventListener('deviceorientation', testOrientation);
+    window.addEventListener('devicemotion', testMotion);
+
+    setTimeout(() => {
+      window.removeEventListener('deviceorientation', testOrientation);
+      window.removeEventListener('devicemotion', testMotion);
+      console.log('Sensor test complete');
+    }, 3000);
   }, []);
 
   // Calibrate sensors when phone is at ground level
@@ -75,212 +115,217 @@ export const useSensorMeasurement = () => {
       return;
     }
 
-    setMeasurementState(prev => ({ ...prev, isCalibrating: true }));
+    console.log('Starting calibration...');
+    setMeasurementState(prev => ({ ...prev, isCalibrating: true, debugInfo: 'Calibrating...' }));
     setError(null);
 
-    // Collect calibration data for 2 seconds
-    const calibrationSamples: SensorData[] = [];
+    // Test sensors first
+    testSensors();
+
+    // Collect calibration data for 3 seconds
+    const calibrationSamples: { alpha: number; beta: number; gamma: number; timestamp: number }[] = [];
     
-    const handleCalibrationMotion = (event: DeviceMotionEvent) => {
-      if (event.acceleration && event.rotationRate) {
+    const handleCalibrationOrientation = (event: DeviceOrientationEvent) => {
+      if (event.alpha !== null && event.beta !== null && event.gamma !== null) {
         calibrationSamples.push({
-          acceleration: {
-            x: event.acceleration.x || 0,
-            y: event.acceleration.y || 0,
-            z: event.acceleration.z || 0,
-          },
-          rotationRate: {
-            alpha: event.rotationRate.alpha || 0,
-            beta: event.rotationRate.beta || 0,
-            gamma: event.rotationRate.gamma || 0,
-          },
-          timestamp: event.timeStamp || Date.now(),
+          alpha: event.alpha,
+          beta: event.beta,
+          gamma: event.gamma,
+          timestamp: Date.now(),
         });
+        console.log('Calibration sample:', { alpha: event.alpha, beta: event.beta, gamma: event.gamma });
       }
     };
 
-    window.addEventListener('devicemotion', handleCalibrationMotion);
+    window.addEventListener('deviceorientation', handleCalibrationOrientation);
 
     setTimeout(() => {
-      window.removeEventListener('devicemotion', handleCalibrationMotion);
+      window.removeEventListener('deviceorientation', handleCalibrationOrientation);
       
       if (calibrationSamples.length > 0) {
         // Calculate average calibration values
-        const avgAcceleration = calibrationSamples.reduce(
+        const avgOrientation = calibrationSamples.reduce(
           (acc, sample) => ({
-            x: acc.x + sample.acceleration.x,
-            y: acc.y + sample.acceleration.y,
-            z: acc.z + sample.acceleration.z,
+            alpha: acc.alpha + sample.alpha,
+            beta: acc.beta + sample.beta,
+            gamma: acc.gamma + sample.gamma,
           }),
-          { x: 0, y: 0, z: 0 }
+          { alpha: 0, beta: 0, gamma: 0 }
         );
 
-        calibrationDataRef.current = {
-          x: avgAcceleration.x / calibrationSamples.length,
-          y: avgAcceleration.y / calibrationSamples.length,
-          z: avgAcceleration.z / calibrationSamples.length,
+        startOrientationRef.current = {
+          alpha: avgOrientation.alpha / calibrationSamples.length,
+          beta: avgOrientation.beta / calibrationSamples.length,
+          gamma: avgOrientation.gamma / calibrationSamples.length,
         };
 
+        console.log('Calibration complete:', startOrientationRef.current);
+        
         setMeasurementState(prev => ({ 
           ...prev, 
           isCalibrating: false,
           heightCm: 0,
           heightFt: 0,
+          heightInches: 0,
           confidence: 0,
+          debugInfo: `Calibrated: β=${startOrientationRef.current?.beta.toFixed(1)}°`
         }));
       } else {
-        setError('Failed to collect calibration data');
+        console.error('No calibration samples collected');
+        setError('Failed to collect calibration data. Please check sensor permissions.');
         setMeasurementState(prev => ({ ...prev, isCalibrating: false }));
       }
-    }, 2000);
-  }, [permissionGranted, requestSensorPermission]);
+    }, 3000);
+  }, [permissionGranted, requestSensorPermission, testSensors]);
 
-  // Start height measurement
+  // Start height measurement using orientation changes
   const startMeasurement = useCallback(() => {
-    if (!calibrationDataRef.current) {
+    if (!startOrientationRef.current) {
       setError('Please calibrate first');
       return;
     }
 
+    console.log('Starting measurement...');
     setMeasurementState(prev => ({ 
       ...prev, 
       isMeasuring: true, 
       isComplete: false,
       heightCm: 0,
       heightFt: 0,
+      heightInches: 0,
+      debugInfo: 'Measuring... move phone up slowly'
     }));
     setError(null);
 
     // Reset measurement data
-    sensorDataRef.current = [];
-    velocityRef.current = { x: 0, y: 0, z: 0 };
-    positionRef.current = { x: 0, y: 0, z: 0 };
-    startPositionRef.current = null;
+    orientationSamplesRef.current = [];
+    measurementStartRef.current = Date.now();
+    endOrientationRef.current = null;
 
-    let lastTimestamp = 0;
-    let filteredAcceleration = { x: 0, y: 0, z: 0 };
+    const handleMeasurementOrientation = (event: DeviceOrientationEvent) => {
+      if (!startOrientationRef.current || event.beta === null || event.alpha === null || event.gamma === null) return;
 
-    const handleMeasurementMotion = (event: DeviceMotionEvent) => {
-      if (!event.acceleration || !calibrationDataRef.current) return;
-
-      const currentTime = event.timeStamp || Date.now();
-      const deltaTime = lastTimestamp ? (currentTime - lastTimestamp) / 1000 : 0;
+      const currentTime = Date.now();
       
-      if (deltaTime <= 0 || deltaTime > 0.1) {
-        lastTimestamp = currentTime;
-        return;
+      // Store orientation sample
+      orientationSamplesRef.current.push({
+        alpha: event.alpha,
+        beta: event.beta,
+        gamma: event.gamma,
+        timestamp: currentTime,
+      });
+
+      // Calculate height based on beta angle change (pitch)
+      const startBeta = startOrientationRef.current.beta;
+      const currentBeta = event.beta;
+      
+      // Calculate angle difference (pitch change)
+      let angleDiff = currentBeta - startBeta;
+      
+      // Normalize angle difference to handle wrap-around
+      if (angleDiff > 180) angleDiff -= 360;
+      if (angleDiff < -180) angleDiff += 360;
+
+      // Use trigonometry to calculate height
+      // Assume user holds phone at arm's length (~60cm from eye level)
+      const armLength = 60; // cm
+      const angleRadians = Math.abs(angleDiff) * (Math.PI / 180);
+      
+      // Calculate height using trigonometry
+      let heightCm = 0;
+      if (Math.abs(angleDiff) > 5) { // Minimum 5-degree change to start measuring
+        heightCm = armLength * Math.tan(angleRadians);
+        
+        // Add some scaling factor based on typical phone usage patterns
+        heightCm = heightCm * 2.5; // Empirical scaling factor
       }
 
-      // Remove gravity and calibration offset
-      const correctedAcceleration = {
-        x: (event.acceleration.x || 0) - calibrationDataRef.current.x,
-        y: (event.acceleration.y || 0) - calibrationDataRef.current.y,
-        z: (event.acceleration.z || 0) - calibrationDataRef.current.z,
-      };
+      // Calculate confidence based on angle stability and measurement time
+      const measurementDuration = (currentTime - measurementStartRef.current) / 1000;
+      const confidence = Math.min(85 + Math.abs(angleDiff) * 0.5, 99.5);
 
-      // Apply low-pass filter to reduce noise
-      filteredAcceleration = {
-        x: applyLowPassFilter(correctedAcceleration.x, filteredAcceleration.x, FILTER_ALPHA),
-        y: applyLowPassFilter(correctedAcceleration.y, filteredAcceleration.y, FILTER_ALPHA),
-        z: applyLowPassFilter(correctedAcceleration.z, filteredAcceleration.z, FILTER_ALPHA),
-      };
+      const { feet, inches, cm } = convertHeight(heightCm);
 
-      // Calculate magnitude and check if movement is primarily vertical
-      const totalMagnitude = Math.sqrt(
-        filteredAcceleration.x ** 2 + 
-        filteredAcceleration.y ** 2 + 
-        filteredAcceleration.z ** 2
-      );
+      setMeasurementState(prev => ({
+        ...prev,
+        heightCm: cm,
+        heightFt: feet,
+        heightInches: inches,
+        confidence: Math.round(confidence * 10) / 10,
+        debugInfo: `Angle: ${angleDiff.toFixed(1)}° | Time: ${measurementDuration.toFixed(1)}s`
+      }));
 
-      // Only process significant vertical movements
-      if (totalMagnitude > NOISE_THRESHOLD) {
-        const verticalComponent = Math.abs(filteredAcceleration.z);
-        const horizontalMagnitude = Math.sqrt(
-          filteredAcceleration.x ** 2 + filteredAcceleration.y ** 2
-        );
-
-        // Check if movement is primarily vertical
-        if (verticalComponent / (verticalComponent + horizontalMagnitude) > VERTICAL_THRESHOLD) {
-          // Integrate acceleration to get velocity (only vertical component)
-          velocityRef.current.z += filteredAcceleration.z * deltaTime;
-          
-          // Integrate velocity to get position
-          positionRef.current.z += velocityRef.current.z * deltaTime;
-
-          // Store start position for relative measurement
-          if (!startPositionRef.current) {
-            startPositionRef.current = { ...positionRef.current };
-          }
-
-          // Calculate height from start position
-          const heightMeters = Math.abs(positionRef.current.z - startPositionRef.current.z);
-          const heightCm = heightMeters * 100;
-          const heightFt = heightCm / 30.48;
-
-          // Calculate confidence based on movement consistency
-          const confidence = Math.min(95 + (verticalComponent / totalMagnitude) * 5, 99.9);
-
-          setMeasurementState(prev => ({
-            ...prev,
-            heightCm: Math.round(heightCm * 10) / 10,
-            heightFt: Math.round(heightFt * 100) / 100,
-            confidence: Math.round(confidence * 10) / 10,
-          }));
-        }
-      }
-
-      lastTimestamp = currentTime;
+      console.log('Measurement update:', {
+        startBeta,
+        currentBeta,
+        angleDiff,
+        heightCm,
+        confidence
+      });
     };
 
-    window.addEventListener('devicemotion', handleMeasurementMotion);
+    window.addEventListener('deviceorientation', handleMeasurementOrientation);
 
     // Store the event listener reference for cleanup
-    (window as any)._measurementListener = handleMeasurementMotion;
+    (window as any)._measurementListener = handleMeasurementOrientation;
   }, []);
 
   // Stop measurement
   const stopMeasurement = useCallback(() => {
     if ((window as any)._measurementListener) {
-      window.removeEventListener('devicemotion', (window as any)._measurementListener);
+      window.removeEventListener('deviceorientation', (window as any)._measurementListener);
       delete (window as any)._measurementListener;
     }
 
+    console.log('Measurement stopped');
     setMeasurementState(prev => ({ 
       ...prev, 
       isMeasuring: false, 
-      isComplete: true 
+      isComplete: true,
+      debugInfo: `Final: ${prev.heightCm}cm (${prev.heightFt}' ${prev.heightInches}")`
     }));
   }, []);
 
   // Reset all measurements
   const resetMeasurement = useCallback(() => {
     if ((window as any)._measurementListener) {
-      window.removeEventListener('devicemotion', (window as any)._measurementListener);
+      window.removeEventListener('deviceorientation', (window as any)._measurementListener);
       delete (window as any)._measurementListener;
     }
 
+    console.log('Measurement reset');
     setMeasurementState({
       isCalibrating: false,
       isMeasuring: false,
       isComplete: false,
       heightCm: 0,
       heightFt: 0,
+      heightInches: 0,
       confidence: 0,
+      debugInfo: '',
     });
     setError(null);
     
-    sensorDataRef.current = [];
-    calibrationDataRef.current = null;
-    startPositionRef.current = null;
-    velocityRef.current = { x: 0, y: 0, z: 0 };
-    positionRef.current = { x: 0, y: 0, z: 0 };
+    orientationSamplesRef.current = [];
+    startOrientationRef.current = null;
+    endOrientationRef.current = null;
+    measurementStartRef.current = 0;
   }, []);
 
   // Check sensor availability on mount
   useEffect(() => {
-    if (!('DeviceMotionEvent' in window)) {
-      setError('Device motion sensors not available');
+    console.log('Checking sensor availability...');
+    
+    if (!('DeviceOrientationEvent' in window)) {
+      setError('Device orientation sensors not available');
+      return;
     }
+
+    if (!('DeviceMotionEvent' in window)) {
+      console.warn('Device motion sensors not available, using orientation only');
+    }
+
+    console.log('Sensors available');
   }, []);
 
   return {

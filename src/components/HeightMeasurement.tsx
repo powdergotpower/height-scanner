@@ -18,10 +18,12 @@ const HeightMeasurement = () => {
 
   const [showInstructions, setShowInstructions] = useState(true);
 
-  const formatHeight = (cm: number, ft: number) => {
-    const feet = Math.floor(ft);
-    const inches = Math.round((ft - feet) * 12);
-    return `${cm} cm (${feet}'${inches}")`;
+  const formatHeight = (cm: number, ft: number, inches: number) => {
+    return {
+      metric: `${cm} cm`,
+      imperial: `${ft}' ${inches}"`,
+      combined: `${cm} cm (${ft}' ${inches}")`
+    };
   };
 
   if (showInstructions && !permissionGranted) {
@@ -106,16 +108,27 @@ const HeightMeasurement = () => {
         {/* Measurement Display */}
         {(measurementState.isMeasuring || measurementState.isComplete) && (
           <div className="mb-8 p-6 bg-precision-gradient rounded-lg text-white text-center">
-            <div className="space-y-2">
-              <div className="text-3xl font-mono font-bold">
-                {measurementState.heightCm.toFixed(1)} cm
+            <div className="space-y-3">
+              <div className="text-4xl font-mono font-bold">
+                {measurementState.heightCm} cm
               </div>
-              <div className="text-lg font-mono opacity-90">
-                {formatHeight(measurementState.heightCm, measurementState.heightFt)}
+              <div className="text-xl font-mono opacity-90">
+                {measurementState.heightFt}' {measurementState.heightInches}"
               </div>
-              <div className="text-sm opacity-75">
+              <div className="text-sm opacity-80 border-t border-white/20 pt-2">
+                Metric: {measurementState.heightCm} cm
+              </div>
+              <div className="text-sm opacity-80">
+                Imperial: {measurementState.heightFt} feet {measurementState.heightInches} inches
+              </div>
+              <div className="text-sm opacity-75 border-t border-white/20 pt-2">
                 Accuracy: {measurementState.confidence}%
               </div>
+              {measurementState.debugInfo && (
+                <div className="text-xs opacity-60 font-mono">
+                  Debug: {measurementState.debugInfo}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -175,13 +188,19 @@ const HeightMeasurement = () => {
           <div className="mt-6 p-4 bg-muted rounded-lg">
             <div className="text-center">
               <div className="text-sm text-tech mb-2">Live Reading</div>
-              <div className="font-mono text-lg">{measurementState.heightCm.toFixed(1)} cm</div>
+              <div className="font-mono text-lg">{measurementState.heightCm} cm</div>
+              <div className="font-mono text-sm text-tech">{measurementState.heightFt}' {measurementState.heightInches}"</div>
               <div className="w-full bg-background rounded-full h-2 mt-3 overflow-hidden">
                 <div 
                   className="h-full bg-precision-gradient transition-all duration-300"
                   style={{ width: `${Math.min((measurementState.heightCm / 200) * 100, 100)}%` }}
                 />
               </div>
+              {measurementState.debugInfo && (
+                <div className="text-xs text-tech mt-2 font-mono">
+                  {measurementState.debugInfo}
+                </div>
+              )}
             </div>
           </div>
         )}
