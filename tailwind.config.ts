@@ -47,6 +47,10 @@ export default {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        precision: "hsl(var(--precision-blue))",
+        tech: "hsl(var(--tech-gray))",
+        success: "hsl(var(--success-green))",
+        warning: "hsl(var(--warning-amber))",
         sidebar: {
           DEFAULT: "hsl(var(--sidebar-background))",
           foreground: "hsl(var(--sidebar-foreground))",
@@ -62,6 +66,18 @@ export default {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
+      },
+      backgroundImage: {
+        'measurement-gradient': 'var(--measurement-gradient)',
+        'primary-gradient': 'var(--primary-gradient)',
+        'precision-gradient': 'var(--precision-gradient)',
+      },
+      boxShadow: {
+        'precise': 'var(--shadow-precise)',
+        'elevation': 'var(--shadow-elevation)',
+      },
+      fontFamily: {
+        'mono': ['JetBrains Mono', 'Menlo', 'Monaco', 'monospace'],
       },
       keyframes: {
         "accordion-down": {
@@ -80,10 +96,30 @@ export default {
             height: "0",
           },
         },
+        "pulse-ring": {
+          "0%": {
+            transform: "scale(0.8)",
+            opacity: "1",
+          },
+          "100%": {
+            transform: "scale(1.4)",
+            opacity: "0",
+          },
+        },
+        "measurement-glow": {
+          "0%, 100%": {
+            opacity: "1",
+          },
+          "50%": {
+            opacity: "0.5",
+          },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
+        "pulse-ring": "pulse-ring 2s cubic-bezier(0.4, 0, 0.6, 1) infinite",
+        "measurement-glow": "measurement-glow 2s ease-in-out infinite",
       },
     },
   },
