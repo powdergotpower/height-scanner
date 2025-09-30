@@ -51,6 +51,7 @@ export const useIMUHeight = () => {
   const velocityRef = useRef<number>(0); // cm/s (vertical, up positive)
   const displacementRef = useRef<number>(0); // cm (integrated, may fluctuate)
   const peakDisplacementRef = useRef<number>(0); // cm (maximum reached - reported height)
+  const biasRef = useRef<number>(0); // m/s^2 vertical accel bias estimated at rest
   const stationarySamplesRef = useRef<number>(0);
   const totalSamplesRef = useRef<number>(0);
   const hasCalibratedRef = useRef<boolean>(false);
@@ -140,6 +141,7 @@ export const useIMUHeight = () => {
     displacementRef.current = 0;
     peakDisplacementRef.current = 0;
     velocityRef.current = 0;
+    biasRef.current = 0;
     lastTimestampRef.current = 0;
     stationarySamplesRef.current = 0;
     totalSamplesRef.current = 0;
@@ -187,10 +189,15 @@ export const useIMUHeight = () => {
       const up = vecNorm({ x: -gNew.x, y: -gNew.y, z: -gNew.z });
 
       // Vertical acceleration (upwards, m/s^2)
-      const aVert = vecDot(aLin, up);
+      const aVertRaw = vecDot(aLin, up);
 
-      // Convert to cm/s^2
-      const aVertCm = aVert * 100;
+      // Bias correction (learn bias while stationary)
+      let aVert = aVertRaw - biasRef.current;
+
+      // Convert to cm/s^2 with sanity clamp
+      let aVertCm = aVert * 100;
+      if (aVertCm > 400) aVertCm = 400;
+      if (aVertCm < -400) aVertCm = -400;
 
       // Simple drift control + ZUPT
       const aLinMag = vecLen(aLin);
@@ -198,16 +205,23 @@ export const useIMUHeight = () => {
       const stationary = Math.abs(aVert) < 0.03 && rotMag < 0.7 && aLinMag < 0.06; // stricter + duration gate
       if (stationary) {
         stationarySamplesRef.current += 1;
+        // Learn bias slowly while stationary (towards zero net accel)
+        biasRef.current = biasRef.current * 0.98 + aVertRaw * 0.02;
       } else {
         stationarySamplesRef.current = 0;
       }
 
       // integrate velocity and displacement
+      // integrate velocity and displacement
       velocityRef.current += aVertCm * dt; // cm/s
 
-      // apply very light damping only when moving
+      // clamp velocity to feasible human motion
+      if (velocityRef.current > 250) velocityRef.current = 250;
+      if (velocityRef.current < -250) velocityRef.current = -250;
+
+      // apply light damping only when moving
       if (!stationary) {
-        velocityRef.current *= 0.9995;
+        velocityRef.current *= 0.999;
       }
 
       // Zero velocity update if stationary for ~500ms
@@ -215,9 +229,11 @@ export const useIMUHeight = () => {
         velocityRef.current = 0;
       }
 
-      // Only integrate upwards movement and track peak height reached
-      const vUp = Math.max(0, velocityRef.current);
-      displacementRef.current += vUp * dt; // cm
+      // integrate displacement from velocity
+      displacementRef.current += velocityRef.current * dt; // cm
+      if (displacementRef.current < 0) displacementRef.current = 0;
+      peakDisplacementRef.current = Math.max(peakDisplacementRef.current, displacementRef.current);
+
       if (displacementRef.current < 0) displacementRef.current = 0;
       peakDisplacementRef.current = Math.max(peakDisplacementRef.current, displacementRef.current);
 
@@ -289,6 +305,7 @@ export const useIMUHeight = () => {
     velocityRef.current = 0;
     displacementRef.current = 0;
     peakDisplacementRef.current = 0;
+    biasRef.current = 0;
     stationarySamplesRef.current = 0;
     totalSamplesRef.current = 0;
     hasCalibratedRef.current = false;
