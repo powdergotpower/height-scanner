@@ -207,7 +207,9 @@ export const useIMUHeight = () => {
       // Clamp to reasonable range
       totalHeightRef.current = Math.max(0, Math.min(250, totalHeightRef.current));
       
-      const cm = Math.round(totalHeightRef.current * 10) / 10;
+      // Add 142 cm offset to get accurate readings
+      const rawCm = Math.round(totalHeightRef.current * 10) / 10;
+      const cm = rawCm + 142;
       const { feet, inches, cm: cmRounded } = toFeetInches(cm);
 
       // Simple confidence based on stability
