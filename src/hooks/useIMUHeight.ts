@@ -49,7 +49,8 @@ export const useIMUHeight = () => {
   const gravityRef = useRef<Vec3>({ x: 0, y: 0, z: 9.81 }); // m/s^2 (downwards)
   const lastTimestampRef = useRef<number>(0);
   const velocityRef = useRef<number>(0); // cm/s (vertical, up positive)
-  const displacementRef = useRef<number>(0); // cm
+  const displacementRef = useRef<number>(0); // cm (integrated, may fluctuate)
+  const peakDisplacementRef = useRef<number>(0); // cm (maximum reached - reported height)
   const stationarySamplesRef = useRef<number>(0);
   const totalSamplesRef = useRef<number>(0);
   const hasCalibratedRef = useRef<boolean>(false);
@@ -137,6 +138,7 @@ export const useIMUHeight = () => {
     }
     setError(null);
     displacementRef.current = 0;
+    peakDisplacementRef.current = 0;
     velocityRef.current = 0;
     lastTimestampRef.current = 0;
     stationarySamplesRef.current = 0;
@@ -153,24 +155,32 @@ export const useIMUHeight = () => {
       confidence: 0,
     }));
 
-    // LPF coefficient for gravity (0.02 quick response)
-    const lpf = 0.02;
+    // LPF coefficient for gravity (smaller = slower updates, more stable)
+    const lpf = 0.01;
 
     const onMotion = (e: DeviceMotionEvent) => {
       const ag = e.accelerationIncludingGravity;
       const rr = e.rotationRate;
       const tsNow = performance.now();
-      const dt = lastTimestampRef.current ? (tsNow - lastTimestampRef.current) / 1000 : (e.interval || 0.02);
+      let dt = (typeof e.interval === 'number' && e.interval > 0)
+        ? e.interval / 1000
+        : (lastTimestampRef.current ? (tsNow - lastTimestampRef.current) / 1000 : 0.02);
       lastTimestampRef.current = tsNow;
-      if (!ag || dt <= 0 || dt > 0.2) return; // drop weird intervals
+      if (!ag) return;
+      dt = Math.max(0.005, Math.min(0.05, dt));
 
-      // Update gravity estimate via LPF
+      // Update gravity estimate via LPF, but freeze during motion to avoid contamination
       const gPrev = gravityRef.current;
       const gMeas: Vec3 = { x: ag.x ?? 0, y: ag.y ?? 0, z: ag.z ?? 0 };
-      const gNew = vecAdd(vecScale(gPrev, 1 - lpf), vecScale(gMeas, lpf));
+      const gCandidate = vecAdd(vecScale(gPrev, 1 - lpf), vecScale(gMeas, lpf));
+      const aLinCandidate = vecSub(gMeas, gCandidate);
+      const rotMag = rr ? Math.sqrt((rr.alpha ?? 0) ** 2 + (rr.beta ?? 0) ** 2 + (rr.gamma ?? 0) ** 2) : 0;
+      const aLinMagCandidate = vecLen(aLinCandidate);
+      const allowGUpdate = aLinMagCandidate < 0.2 && rotMag < 3; // update only when mostly still
+      const gNew = allowGUpdate ? gCandidate : gPrev;
       gravityRef.current = gNew;
 
-      // Linear acceleration (device) in m/s^2
+      // Linear acceleration (device) in m/s^2 using stable gravity
       const aLin = vecSub(gMeas, gNew);
 
       // Up direction is opposite to gravity
@@ -183,10 +193,9 @@ export const useIMUHeight = () => {
       const aVertCm = aVert * 100;
 
       // Simple drift control + ZUPT
-      const rotMag = rr ? Math.sqrt((rr.alpha ?? 0) ** 2 + (rr.beta ?? 0) ** 2 + (rr.gamma ?? 0) ** 2) : 0;
       const aLinMag = vecLen(aLin);
 
-      const stationary = Math.abs(aVert) < 0.05 && rotMag < 1 && aLinMag < 0.08; // thresholds tuned for phones
+      const stationary = Math.abs(aVert) < 0.03 && rotMag < 0.7 && aLinMag < 0.06; // stricter + duration gate
       if (stationary) {
         stationarySamplesRef.current += 1;
       } else {
@@ -196,23 +205,29 @@ export const useIMUHeight = () => {
       // integrate velocity and displacement
       velocityRef.current += aVertCm * dt; // cm/s
 
-      // apply damping to limit drift when not moving much
-      velocityRef.current *= 0.995;
+      // apply very light damping only when moving
+      if (!stationary) {
+        velocityRef.current *= 0.9995;
+      }
 
-      // Zero velocity update if stationary for ~200ms
-      if (stationarySamplesRef.current * dt >= 0.2) {
+      // Zero velocity update if stationary for ~500ms
+      if (stationarySamplesRef.current * dt >= 0.5) {
         velocityRef.current = 0;
       }
 
-      displacementRef.current += velocityRef.current * dt; // cm
+      // Only integrate upwards movement and track peak height reached
+      const vUp = Math.max(0, velocityRef.current);
+      displacementRef.current += vUp * dt; // cm
+      if (displacementRef.current < 0) displacementRef.current = 0;
+      peakDisplacementRef.current = Math.max(peakDisplacementRef.current, displacementRef.current);
 
       // Clamp to realistic human range
-      if (displacementRef.current < 0) displacementRef.current = 0;
       if (displacementRef.current > 300) displacementRef.current = 300;
+      if (peakDisplacementRef.current > 300) peakDisplacementRef.current = 300;
 
       totalSamplesRef.current += 1;
 
-      const cm = Math.round(displacementRef.current * 10) / 10;
+      const cm = Math.round(peakDisplacementRef.current * 10) / 10;
       const { feet, inches, cm: cmRounded } = toFeetInches(cm);
 
       // Confidence heuristic: more movement + stability at end
@@ -225,7 +240,7 @@ export const useIMUHeight = () => {
         heightFt: feet,
         heightInches: inches,
         confidence: Math.round(conf * 10) / 10,
-        debugInfo: `aV:${aVert.toFixed(2)} m/s² v:${velocityRef.current.toFixed(1)} cm/s`,
+        debugInfo: `aV:${aVert.toFixed(2)} m/s² v:${velocityRef.current.toFixed(1)} cm/s dt:${dt.toFixed(3)}s`,
       }));
     };
 
@@ -273,6 +288,7 @@ export const useIMUHeight = () => {
     lastTimestampRef.current = 0;
     velocityRef.current = 0;
     displacementRef.current = 0;
+    peakDisplacementRef.current = 0;
     stationarySamplesRef.current = 0;
     totalSamplesRef.current = 0;
     hasCalibratedRef.current = false;
