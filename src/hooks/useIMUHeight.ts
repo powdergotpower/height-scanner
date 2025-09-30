@@ -45,15 +45,13 @@ export const useIMUHeight = () => {
   const [error, setError] = useState<string | null>(null);
   const [permissionGranted, setPermissionGranted] = useState(false);
 
-  // IMU runtime refs
-  const gravityRef = useRef<Vec3>({ x: 0, y: 0, z: 9.81 }); // m/s^2 (downwards)
+  // Simple conservative approach - track only upward segments
+  const gravityRef = useRef<Vec3>({ x: 0, y: 0, z: 9.81 });
   const lastTimestampRef = useRef<number>(0);
-  const velocityRef = useRef<number>(0); // cm/s (vertical, up positive)
-  const displacementRef = useRef<number>(0); // cm (integrated, may fluctuate)
-  const peakDisplacementRef = useRef<number>(0); // cm (maximum reached - reported height)
-  const biasRef = useRef<number>(0); // m/s^2 vertical accel bias estimated at rest
-  const stationarySamplesRef = useRef<number>(0);
-  const totalSamplesRef = useRef<number>(0);
+  const totalHeightRef = useRef<number>(0); // accumulated height from upward segments
+  const velocityRef = useRef<number>(0); // current velocity
+  const stationaryTimeRef = useRef<number>(0);
+  const movingUpTimeRef = useRef<number>(0);
   const hasCalibratedRef = useRef<boolean>(false);
 
   // permissions (iOS 13+)
@@ -138,13 +136,13 @@ export const useIMUHeight = () => {
       return;
     }
     setError(null);
-    displacementRef.current = 0;
-    peakDisplacementRef.current = 0;
+    
+    // Reset everything
+    totalHeightRef.current = 0;
     velocityRef.current = 0;
-    biasRef.current = 0;
     lastTimestampRef.current = 0;
-    stationarySamplesRef.current = 0;
-    totalSamplesRef.current = 0;
+    stationaryTimeRef.current = 0;
+    movingUpTimeRef.current = 0;
 
     setMeasurementState((p) => ({
       ...p,
@@ -157,112 +155,76 @@ export const useIMUHeight = () => {
       confidence: 0,
     }));
 
-    // LPF coefficient for gravity (smaller = slower updates, more stable)
-    const lpf = 0.01;
-
     const onMotion = (e: DeviceMotionEvent) => {
       const ag = e.accelerationIncludingGravity;
-      const rr = e.rotationRate;
       const tsNow = performance.now();
-      let dt = (typeof e.interval === 'number' && e.interval > 0)
-        ? e.interval / 1000
-        : (lastTimestampRef.current ? (tsNow - lastTimestampRef.current) / 1000 : 0.02);
+      const dt = lastTimestampRef.current ? Math.min(0.05, (tsNow - lastTimestampRef.current) / 1000) : 0.02;
       lastTimestampRef.current = tsNow;
-      if (!ag) return;
-      dt = Math.max(0.005, Math.min(0.05, dt));
+      if (!ag || dt <= 0) return;
 
-      // Update gravity estimate via LPF, but freeze during motion to avoid contamination
-      const gPrev = gravityRef.current;
+      // Get sensor data
       const gMeas: Vec3 = { x: ag.x ?? 0, y: ag.y ?? 0, z: ag.z ?? 0 };
-      const gCandidate = vecAdd(vecScale(gPrev, 1 - lpf), vecScale(gMeas, lpf));
-      const aLinCandidate = vecSub(gMeas, gCandidate);
-      const rotMag = rr ? Math.sqrt((rr.alpha ?? 0) ** 2 + (rr.beta ?? 0) ** 2 + (rr.gamma ?? 0) ** 2) : 0;
-      const aLinMagCandidate = vecLen(aLinCandidate);
-      const allowGUpdate = aLinMagCandidate < 0.2 && rotMag < 3; // update only when mostly still
-      const gNew = allowGUpdate ? gCandidate : gPrev;
-      gravityRef.current = gNew;
-
-      // Linear acceleration (device) in m/s^2 using stable gravity
-      const aLin = vecSub(gMeas, gNew);
-
-      // Up direction is opposite to gravity
-      const up = vecNorm({ x: -gNew.x, y: -gNew.y, z: -gNew.z });
-
-      // Vertical acceleration (upwards, m/s^2)
-      const aVertRaw = vecDot(aLin, up);
-
-      // Bias correction (learn bias while stationary)
-      let aVert = aVertRaw - biasRef.current;
-
-      // Convert to cm/s^2 with sanity clamp
-      let aVertCm = aVert * 100;
-      if (aVertCm > 400) aVertCm = 400;
-      if (aVertCm < -400) aVertCm = -400;
-
-      // Simple drift control + ZUPT
-      const aLinMag = vecLen(aLin);
-
-      const stationary = Math.abs(aVert) < 0.03 && rotMag < 0.7 && aLinMag < 0.06; // stricter + duration gate
-      if (stationary) {
-        stationarySamplesRef.current += 1;
-        // Learn bias slowly while stationary (towards zero net accel)
-        biasRef.current = biasRef.current * 0.98 + aVertRaw * 0.02;
+      const gravity = gravityRef.current;
+      
+      // Linear acceleration
+      const aLin = vecSub(gMeas, gravity);
+      const up = vecNorm({ x: -gravity.x, y: -gravity.y, z: -gravity.z });
+      const aVert = vecDot(aLin, up); // m/s^2
+      
+      // Convert to cm/s^2
+      const aVertCm = aVert * 100;
+      
+      // Very conservative motion detection
+      const isStationary = Math.abs(aVert) < 0.02 && vecLen(aLin) < 0.05;
+      const isMovingUp = aVert > 0.05;
+      
+      if (isStationary) {
+        stationaryTimeRef.current += dt;
+        movingUpTimeRef.current = 0;
+        // Aggressive velocity reset when stationary
+        if (stationaryTimeRef.current > 0.3) {
+          velocityRef.current = 0;
+        }
+      } else if (isMovingUp) {
+        stationaryTimeRef.current = 0;
+        movingUpTimeRef.current += dt;
+        // Only integrate when clearly moving up
+        velocityRef.current += aVertCm * dt;
+        // Strict velocity limits
+        velocityRef.current = Math.max(0, Math.min(80, velocityRef.current)); // max 80 cm/s
       } else {
-        stationarySamplesRef.current = 0;
+        stationaryTimeRef.current = 0;
+        movingUpTimeRef.current = 0;
+        // Apply strong damping when not clearly moving up
+        velocityRef.current *= 0.9;
       }
-
-      // integrate velocity and displacement
-      // integrate velocity and displacement
-      velocityRef.current += aVertCm * dt; // cm/s
-
-      // clamp velocity to feasible human motion
-      if (velocityRef.current > 250) velocityRef.current = 250;
-      if (velocityRef.current < -250) velocityRef.current = -250;
-
-      // apply light damping only when moving
-      if (!stationary) {
-        velocityRef.current *= 0.999;
+      
+      // Integrate displacement only when velocity is positive and reasonable
+      if (velocityRef.current > 1 && movingUpTimeRef.current > 0.1) {
+        totalHeightRef.current += velocityRef.current * dt;
       }
-
-      // Zero velocity update if stationary for ~500ms
-      if (stationarySamplesRef.current * dt >= 0.5) {
-        velocityRef.current = 0;
-      }
-
-      // integrate displacement from velocity
-      displacementRef.current += velocityRef.current * dt; // cm
-      if (displacementRef.current < 0) displacementRef.current = 0;
-      peakDisplacementRef.current = Math.max(peakDisplacementRef.current, displacementRef.current);
-
-      if (displacementRef.current < 0) displacementRef.current = 0;
-      peakDisplacementRef.current = Math.max(peakDisplacementRef.current, displacementRef.current);
-
-      // Clamp to realistic human range
-      if (displacementRef.current > 300) displacementRef.current = 300;
-      if (peakDisplacementRef.current > 300) peakDisplacementRef.current = 300;
-
-      totalSamplesRef.current += 1;
-
-      const cm = Math.round(peakDisplacementRef.current * 10) / 10;
+      
+      // Clamp to reasonable range
+      totalHeightRef.current = Math.max(0, Math.min(250, totalHeightRef.current));
+      
+      const cm = Math.round(totalHeightRef.current * 10) / 10;
       const { feet, inches, cm: cmRounded } = toFeetInches(cm);
 
-      // Confidence heuristic: more movement + stability at end
-      const confBase = Math.min(95, 60 + Math.min(35, (cmRounded / 200) * 35));
-      const conf = stationary ? Math.min(99.5, confBase + 3) : confBase;
+      // Simple confidence based on stability
+      const conf = isStationary && cm > 10 ? 95 : 75;
 
       setMeasurementState((p) => ({
         ...p,
         heightCm: cmRounded,
         heightFt: feet,
         heightInches: inches,
-        confidence: Math.round(conf * 10) / 10,
-        debugInfo: `aV:${aVert.toFixed(2)} m/s² v:${velocityRef.current.toFixed(1)} cm/s dt:${dt.toFixed(3)}s`,
+        confidence: conf,
+        debugInfo: `aV:${aVert.toFixed(2)} v:${velocityRef.current.toFixed(1)} ${isStationary ? 'STILL' : isMovingUp ? 'UP' : 'OTHER'}`,
       }));
     };
 
     const onOrientation = (e: DeviceOrientationEvent) => {
-      // If the phone is clearly tilting side-to-side, ignore; we only use IMU vertical
-      // But we still keep this listener to ensure iOS permissions are active
+      // Keep for iOS permissions
     };
 
     window.addEventListener('devicemotion', onMotion);
@@ -301,13 +263,11 @@ export const useIMUHeight = () => {
     }
 
     gravityRef.current = { x: 0, y: 0, z: 9.81 };
-    lastTimestampRef.current = 0;
+    totalHeightRef.current = 0;
     velocityRef.current = 0;
-    displacementRef.current = 0;
-    peakDisplacementRef.current = 0;
-    biasRef.current = 0;
-    stationarySamplesRef.current = 0;
-    totalSamplesRef.current = 0;
+    lastTimestampRef.current = 0;
+    stationaryTimeRef.current = 0;
+    movingUpTimeRef.current = 0;
     hasCalibratedRef.current = false;
 
     setMeasurementState({
